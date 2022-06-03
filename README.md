@@ -269,4 +269,145 @@ Based from the `db.query(URL).all()` we're querying all entries of our URL table
 
 Further reading: [PEP 506](https://peps.python.org/pep-0506/)
 
-### [TBC] Forwarding a Shortened URL
+### Forwarding a Shortened URL
+
+In more technical terms, the behaviour of *forwarding* means that we need to redirect HTTP requests with URL.key to the URL.target_url address.
+
+Our final URL Forward code block in our *main.py* script
+
+```[python]
+# URL_Shortener/main.py
+
+import secrets
+
+import validators
+from fastapi import Depends
+from fastapi import FastAPI
+from fastapi import HTTPException
+from fastapi import Request
+from fastapi.responses import RedirectResponse
+from sqlalchemy.orm import Session
+
+from . import models
+from . import schemas
+from .database import SessionLocal
+from .database import engine
+
+
+app = FastAPI()
+models.Base.metadata.create_all(bind=engine)
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+def raise_bad_request(message):
+    raise HTTPException(status_code=400, detail=message)
+
+
+def raise_not_found(request):
+    """If the provided URL.key doesn't match any URLs
+    in our database, this function would be invoked.
+    """
+    message = f"URL '{request.url}' doesn't exist"
+    raise HTTPException(status_code=404, detail=message)
+
+
+@app.post("/url", response_model=schemas.URLInfo)
+def create_url(url: schemas.URLBase, db: Session = Depends(get_db)):
+    if not validators.url(url.target_url):
+        raise_bad_request(message="Your provided URL is not valid.")
+        
+    chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    key = "".join(secrets.choice(chars) for _ in range(5))
+    secret_key = "".join(secrets.choice(chars) for _ in range(8))
+    db_url = models.URL(
+        target_url=url.target_url, key=key, secret_key=secret_key
+    )
+    db.add(db_url)
+    db.commit()
+    db.refresh(db_url)
+    db_url.url = key
+    db_url.admin_url = secret_key
+    
+    return db_url
+
+
+@app.get("/{url_key}")
+def forward_to_target_url(
+    url_key: str,
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    db_url = (
+        db.query(models.URL)
+        .filter(models.URL.key == url_key, models.URL.is_active)
+        .first()
+    )
+    if db_url:
+        return RedirectResponse(db_url.target_url)
+    else:
+        raise_not_found(request)
+```
+
+### Tidying up our Code
+
+#### Spotting flaws in our codebase
+
+Keep in mind to limit the scope of your refactoring process, and in our `create_url()` function we should be able to outsource any computation of our data to other functions. And in our decorator `app.post("/url", response_model=schemas.URLInfo)`, there is no harm being done here in which we're not trying to save this part to our database. But there should be an apparent separation of the database interactions in the lines above.
+
+In summary, our `create_url()` functions is loaded with too many actions.
+
+The same goes for our `forward_to_target_url()`, it doesn't feel right that we are interacting with the database in the function that defines an API Endpoint.
+
+#### Refactoring our Code
+
+In creating the `keygen.py` script, we randomly choose five characters from chars and return the provided secret key. The *secrets* module is recommended when creating random strings that you use as secret keys.
+
+```[python]
+(shortener_app_dev) C:\Users\creyes24\Real-World-Python>py -i "URL_Shortener\keygen.py"
+>>> create_random_keys()
+'6RPX9'
+>>> create_random_keys(length=8)
+'A5WWQS32'
+>>>
+```
+
+Then we will be creating a `crud.py` that contains the actions of *Create, Read, Update, and Delete (CRUD)* items in our database. In our `crud.py` script, there's a minor chance wherein our `keygen.create_random_key()` to return a key that already exists.
+
+We are now going to create a function `create_unique_random_key()` on the `keygen.py` script. Using this logic makes sure that every shortened URL exists only once.
+
+By calling `keygen.create_unique_random_key()`, we ensure that there are no two duplicate keys in the database. In the `keygen.create_random_key()` returns a string created already at some point before, then putting the unique key upfront makes the whole string unique.
+
+### Managing our URLs
+
+#### Getting information about our URL
+
+Based from the added code block that we placed in our `main.py` script, we're defining a new API endpoint at the `/admin/{secret_key}` URL.
+
+#### Updating our Visitor Count
+
+*NOTE:* The methods `.commit()` and `.refresh()` are from `db`, not `db_url`.
+
+#### Deleting a URL
+
+We added a safe deletion functionality wherein we have a `is_active` tag to show to the user that the said URL has already been 'deleted', but in truth as the adminstrator of the web api url shortener application, we can still store it just in case the user changes its mind about deletion of the said URL.
+
+### Conclusion
+
+We've successfully build end-to-end a FastAPI web app that creates and manages shortened URLs.
+
+### Next Steps
+
+Here are some ideas for additional features:
+
+* *Custom URL Key*: letting our users create custom URL keys instead of a random string.
+* *Peek URL*: Create an endpoint for our users to check which target URL is behind a shortened URL
+* *Graceful forward*: Check if the website exists before forwarding.
+
+We can also consider adding a front end with our URL shortener web app too!
